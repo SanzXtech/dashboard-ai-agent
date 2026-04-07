@@ -1,0 +1,16 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: #06070a;
+  color: #c9d1d9;
+  font-family: system-ui, sans-serif;
+  overflow: hidden;
+}
