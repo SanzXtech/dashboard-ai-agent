@@ -12,11 +12,10 @@ import {
 // TYPES
 // ═══════════════════════════════════════════════════════════
 interface BotStatus {
-  bot: { name: string; number: string; owner: string; ownerName: string; prefix: string; public: boolean; connection: string; uptime: number; version: string };
-  memory: { rss: number; heapUsed: number; heapTotal: number; external: number };
-  stats: { totalPlugins: number; totalUsers: number; totalChats: number; hitToday: string };
-  selfHeal: { enabled: boolean; autoFix: boolean };
-  timestamp: number;
+  ram: { total: number; free: number; used: number; process: number; heapUsed: number; heapTotal: number; percentage: number; processPercentage: number };
+  cpu: { model: string; cores: number; speed: number };
+  bot: { name: string; uptime: number; uptimeFormatted: string; pluginCount: number; userCount: number; groupCount: number; version: string; platform: string; ownerName: string; ownerNumber: string; prefix: string; isPublic: boolean };
+  system: { platform: string; arch: string; hostname: string; nodeVersion: string; uptime: number };
 }
 
 interface SelfHealEvent {
@@ -51,14 +50,14 @@ interface BotSettings {
   botName: string;
   ownerName: string;
   prefix: string;
-  public: boolean;
+  isPublic: boolean;
   autoTyping: boolean;
   antiSpam: boolean;
-  gcOnly: boolean;
+  autoSticker: boolean;
   selfHealEnabled: boolean;
   selfHealAutoFix: boolean;
-  packName: string;
-  authorName: string;
+  selfHealTimeout: number;
+  selfHealMaxCycles: number;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -94,7 +93,7 @@ const getTime = () => {
 // ═══════════════════════════════════════════════════════════
 export default function HertaDashboard() {
   const [apiUrl, setApiUrl] = useState("");
-  const [apiKey, setApiKey] = useState("herta-v3-dashboard-2024");
+  const [apiKey, setApiKey] = useState("selfheal-dashboard");
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [activeTab, setActiveTab] = useState<"overview" | "selfheal" | "settings" | "terminal">("overview");
@@ -117,10 +116,10 @@ export default function HertaDashboard() {
   const apiFetch = useCallback(
     async (path: string, opts: RequestInit = {}) => {
       if (!apiUrl) throw new Error("Not configured");
-      const url = `${apiUrl}${path}${path.includes("?") ? "&" : "?"}key=${apiKey}`;
+      const url = `${apiUrl}/api/dashboard${path}${path.includes("?") ? "&" : "?"}key=${apiKey}`;
       const res = await fetch(url, {
         ...opts,
-        headers: { "Content-Type": "application/json", "X-Dashboard-Key": apiKey, ...opts.headers },
+        headers: { "Content-Type": "application/json", "X-API-Key": apiKey, ...opts.headers },
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json();
@@ -133,7 +132,7 @@ export default function HertaDashboard() {
     if (!apiUrl) return;
     setConnecting(true);
     try {
-      const data = await apiFetch("/api/status");
+      const data = await apiFetch("/stats");
       setStatus(data);
       setConnected(true);
       setShowApiConfig(false);
@@ -141,33 +140,51 @@ export default function HertaDashboard() {
 
       // Load settings
       try {
-        const s = await apiFetch("/api/settings");
+        const s = await apiFetch("/settings");
         setSettings(s);
       } catch {}
 
       // Load self-heal status
       try {
-        const sh = await apiFetch("/api/selfheal/status");
+        const sh = await apiFetch("/selfheal/status");
         setSelfHealStatus(sh);
-        if (sh.events) setEvents(sh.events);
+      } catch {}
+
+      // Load activity logs
+      try {
+        const logData = await apiFetch("/logs");
+        if (Array.isArray(logData)) {
+          setLogs((p) => [...p, ...logData.map((l: any) => ({
+            time: new Date(l.time).toLocaleTimeString("id-ID"),
+            type: l.type as LogEntry["type"],
+            source: l.source,
+            text: l.text,
+          }))]);
+        }
       } catch {}
 
       // Start SSE
       if (eventSourceRef.current) eventSourceRef.current.close();
-      const es = new EventSource(`${apiUrl}/api/events?key=${apiKey}`);
-      es.addEventListener("selfheal", (e) => {
+      const es = new EventSource(`${apiUrl}/api/dashboard/events?key=${apiKey}`);
+      es.onmessage = (e) => {
         try {
-          const ev = JSON.parse(e.data);
-          setEvents((p) => [...p.slice(-99), ev]);
-          setLogs((p) => [
-            ...p.slice(-99),
-            { time: getTime(), type: ev.type === "fix_started" ? "FIX" : "INFO", source: "SelfHeal", text: JSON.stringify(ev).slice(0, 150) },
-          ]);
+          const msg = JSON.parse(e.data);
+          if (msg.event === "connected") {
+            setLogs((p) => [...p, { time: getTime(), type: "SUCC", source: "SSE", text: "Real-time stream connected" }]);
+          } else if (msg.event === "log") {
+            const l = msg.data;
+            setLogs((p) => [...p.slice(-99), { time: new Date(l.time).toLocaleTimeString("id-ID"), type: l.type, source: l.source, text: l.text }]);
+          } else if (msg.event === "plan" || msg.event === "plan_update") {
+            // Refresh plans
+            apiFetch("/plans").then((p: Plan[]) => setPlans(p)).catch(() => {});
+          } else if (msg.event === "setting_change") {
+            setLogs((p) => [...p, { time: getTime(), type: "INFO", source: "SSE", text: `Setting changed: ${msg.data.key} = ${msg.data.value}` }]);
+          } else if (msg.event === "restart") {
+            setLogs((p) => [...p, { time: getTime(), type: "WARN", source: "SSE", text: "Bot restarting..." }]);
+            setConnected(false);
+          }
         } catch {}
-      });
-      es.addEventListener("connected", () => {
-        setLogs((p) => [...p, { time: getTime(), type: "SUCC", source: "SSE", text: "Real-time stream connected" }]);
-      });
+      };
       es.onerror = () => {
         setLogs((p) => [...p, { time: getTime(), type: "WARN", source: "SSE", text: "Stream interrupted, reconnecting..." }]);
       };
@@ -177,7 +194,7 @@ export default function HertaDashboard() {
       if (pollRef.current) clearInterval(pollRef.current);
       pollRef.current = setInterval(async () => {
         try {
-          const d = await apiFetch("/api/status");
+          const d = await apiFetch("/stats");
           setStatus(d);
         } catch {
           setConnected(false);
@@ -199,13 +216,13 @@ export default function HertaDashboard() {
     setCommandOutput((p) => [...p, `> ${cmd}`]);
 
     try {
-      const data = await apiFetch("/api/selfheal/command", {
+      const data = await apiFetch("/selfheal/fix", {
         method: "POST",
-        body: JSON.stringify({ command: cmd }),
+        body: JSON.stringify({ command: cmd, description: cmd }),
       });
-      setCommandOutput((p) => [...p, `  ${data.ok ? "✅" : "❌"} ${data.message}`]);
-      if (data.plugin) {
-        setCommandOutput((p) => [...p, `  📁 Plugin: ${data.plugin}`]);
+      setCommandOutput((p) => [...p, `  ${data.success ? "✅" : "❌"} ${data.message}`]);
+      if (data.planId) {
+        setCommandOutput((p) => [...p, `  📋 Plan: ${data.planId}`]);
       }
     } catch (err: any) {
       setCommandOutput((p) => [...p, `  ❌ Error: ${err.message}`]);
@@ -215,7 +232,7 @@ export default function HertaDashboard() {
   // ── Toggle Self-Heal ──
   const toggleSelfHeal = async () => {
     try {
-      const data = await apiFetch("/api/selfheal/toggle", { method: "POST" });
+      const data = await apiFetch("/selfheal/toggle", { method: "POST" });
       setSettings((p) => (p ? { ...p, selfHealEnabled: data.enabled } : p));
       setLogs((p) => [...p, { time: getTime(), type: "SUCC", source: "Dashboard", text: `Self-Heal ${data.enabled ? "enabled" : "disabled"}` }]);
     } catch {}
@@ -224,7 +241,7 @@ export default function HertaDashboard() {
   // ── Update Setting ──
   const updateSetting = async (key: string, value: any) => {
     try {
-      await apiFetch("/api/settings", { method: "POST", body: JSON.stringify({ [key]: value }) });
+      await apiFetch("/settings", { method: "POST", body: JSON.stringify({ [key]: value }) });
       setSettings((p) => (p ? { ...p, [key]: value } : p));
       setLogs((p) => [...p, { time: getTime(), type: "SUCC", source: "Dashboard", text: `Updated ${key}` }]);
     } catch {}
@@ -234,7 +251,7 @@ export default function HertaDashboard() {
   const restartBot = async () => {
     if (!confirm("Restart bot?")) return;
     try {
-      await apiFetch("/api/restart", { method: "POST" });
+      await apiFetch("/restart", { method: "POST" });
       setLogs((p) => [...p, { time: getTime(), type: "WARN", source: "Dashboard", text: "Bot restarting..." }]);
       setConnected(false);
     } catch {}
@@ -273,10 +290,10 @@ export default function HertaDashboard() {
         <div className="flex-1" />
         {connected && status && (
           <div className="hidden md:flex items-center gap-4 text-xs text-[#8b949e]">
-            <div className="flex items-center gap-1"><Clock className="w-3 h-3" /> {formatUptime(status.bot.uptime)}</div>
-            <div className="flex items-center gap-1"><MemoryStick className="w-3 h-3" /> {status.memory.rss}MB</div>
-            <div className="flex items-center gap-1"><Users className="w-3 h-3" /> {status.stats.totalUsers}</div>
-            <div className="flex items-center gap-1"><Zap className="w-3 h-3 text-yellow-400" /> {status.stats.hitToday}</div>
+            <div className="flex items-center gap-1"><Clock className="w-3 h-3" /> {status.bot.uptimeFormatted || formatUptime(status.bot.uptime)}</div>
+            <div className="flex items-center gap-1"><MemoryStick className="w-3 h-3" /> {formatBytes(status.ram.process)}</div>
+            <div className="flex items-center gap-1"><Users className="w-3 h-3" /> {status.bot.userCount}</div>
+            <div className="flex items-center gap-1"><Layers className="w-3 h-3 text-[#00e676]" /> {status.bot.pluginCount} plugins</div>
           </div>
         )}
         <button onClick={() => setShowApiConfig(!showApiConfig)} className="p-1.5 rounded hover:bg-[#21262d] transition-colors">
@@ -370,10 +387,10 @@ export default function HertaDashboard() {
             <div className="space-y-6 animate-slide-up">
               {/* Stats Cards */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <StatCard icon={<Clock className="w-5 h-5 text-[#00e5ff]" />} label="Uptime" value={formatUptime(status.bot.uptime)} />
-                <StatCard icon={<MemoryStick className="w-5 h-5 text-[#ff9800]" />} label="RAM Usage" value={`${status.memory.rss} MB`} sub={`Heap: ${status.memory.heapUsed}/${status.memory.heapTotal} MB`} />
-                <StatCard icon={<Layers className="w-5 h-5 text-[#00e676]" />} label="Plugins" value={String(status.stats.totalPlugins)} />
-                <StatCard icon={<Users className="w-5 h-5 text-[#e040fb]" />} label="Users" value={String(status.stats.totalUsers)} sub={`${status.stats.totalChats} chats`} />
+                <StatCard icon={<Clock className="w-5 h-5 text-[#00e5ff]" />} label="Uptime" value={status.bot.uptimeFormatted || formatUptime(status.bot.uptime)} />
+                <StatCard icon={<MemoryStick className="w-5 h-5 text-[#ff9800]" />} label="RAM Usage" value={`${formatBytes(status.ram.process)}`} sub={`Heap: ${formatBytes(status.ram.heapUsed)}/${formatBytes(status.ram.heapTotal)}`} />
+                <StatCard icon={<Layers className="w-5 h-5 text-[#00e676]" />} label="Plugins" value={String(status.bot.pluginCount)} />
+                <StatCard icon={<Users className="w-5 h-5 text-[#e040fb]" />} label="Users" value={String(status.bot.userCount)} sub={`${status.bot.groupCount} groups`} />
               </div>
 
               {/* Bot Info + RAM Chart */}
@@ -385,13 +402,14 @@ export default function HertaDashboard() {
                   </h3>
                   <div className="space-y-3 text-sm">
                     <InfoRow label="Name" value={status.bot.name} />
-                    <InfoRow label="Number" value={status.bot.number || "N/A"} />
-                    <InfoRow label="Owner" value={`${status.bot.ownerName} (${status.bot.owner})`} />
+                    <InfoRow label="Number" value={status.bot.ownerNumber || "N/A"} />
+                    <InfoRow label="Owner" value={status.bot.ownerName} />
                     <InfoRow label="Prefix" value={status.bot.prefix} />
-                    <InfoRow label="Mode" value={status.bot.public ? "Public" : "Self"} color={status.bot.public ? "#00e676" : "#ff9800"} />
-                    <InfoRow label="Connection" value={status.bot.connection} color={status.bot.connection === "connected" ? "#00e676" : "#ff1744"} />
-                    <InfoRow label="Hit Today" value={status.stats.hitToday} />
-                    <InfoRow label="Platform" value={status.bot.version ? `v${status.bot.version}` : "N/A"} />
+                    <InfoRow label="Mode" value={status.bot.isPublic ? "Public" : "Self"} color={status.bot.isPublic ? "#00e676" : "#ff9800"} />
+                    <InfoRow label="Platform" value={status.bot.platform} />
+                    <InfoRow label="Version" value={`v${status.bot.version}`} />
+                    <InfoRow label="Node.js" value={status.system.nodeVersion} />
+                    <InfoRow label="System" value={`${status.system.platform} ${status.system.arch}`} />
                   </div>
                 </div>
 
@@ -401,14 +419,17 @@ export default function HertaDashboard() {
                     <Cpu className="w-4 h-4 text-[#ff9800]" /> Memory Dashboard
                   </h3>
                   <div className="space-y-4">
-                    <RAMBar label="RSS" used={status.memory.rss} total={512} color="#00e5ff" />
-                    <RAMBar label="Heap Used" used={status.memory.heapUsed} total={status.memory.heapTotal} color="#00e676" />
-                    <RAMBar label="Heap Total" used={status.memory.heapTotal} total={512} color="#ff9800" />
-                    <RAMBar label="External" used={status.memory.external} total={100} color="#e040fb" />
+                    <RAMBar label="Process RSS" used={Math.round(status.ram.process / 1048576)} total={Math.round(status.ram.total / 1048576)} color="#00e5ff" />
+                    <RAMBar label="Heap Used" used={Math.round(status.ram.heapUsed / 1048576)} total={Math.round(status.ram.heapTotal / 1048576)} color="#00e676" />
+                    <RAMBar label="System RAM" used={Math.round(status.ram.used / 1048576)} total={Math.round(status.ram.total / 1048576)} color="#ff9800" />
                   </div>
                   <div className="mt-4 pt-3 border-t border-[#30363d] grid grid-cols-2 gap-2 text-xs text-[#8b949e]">
-                    <div>Self-Heal: <span className={status.selfHeal.enabled ? "text-[#00e676]" : "text-[#ff1744]"}>{status.selfHeal.enabled ? "ON" : "OFF"}</span></div>
-                    <div>AutoFix: <span className={status.selfHeal.autoFix ? "text-[#00e676]" : "text-[#8b949e]"}>{status.selfHeal.autoFix ? "ON" : "OFF"}</span></div>
+                    <div>CPU: <span className="text-[#00e5ff]">{status.cpu.cores} cores</span></div>
+                    <div>RAM: <span className="text-[#ff9800]">{status.ram.percentage}%</span></div>
+                    {selfHealStatus && <>
+                      <div>Self-Heal: <span className={selfHealStatus.enabled ? "text-[#00e676]" : "text-[#ff1744]"}>{selfHealStatus.enabled ? "ON" : "OFF"}</span></div>
+                      <div>AutoFix: <span className={selfHealStatus.autoFix ? "text-[#00e676]" : "text-[#8b949e]"}>{selfHealStatus.autoFix ? "ON" : "OFF"}</span></div>
+                    </>}
                   </div>
                 </div>
               </div>
@@ -541,8 +562,6 @@ export default function HertaDashboard() {
                   <SettingInput label="Bot Name" value={settings.botName} onChange={(v) => updateSetting("botName", v)} />
                   <SettingInput label="Owner Name" value={settings.ownerName} onChange={(v) => updateSetting("ownerName", v)} />
                   <SettingInput label="Prefix" value={settings.prefix} onChange={(v) => updateSetting("prefix", v)} />
-                  <SettingInput label="Sticker Pack" value={settings.packName} onChange={(v) => updateSetting("packName", v)} />
-                  <SettingInput label="Author Name" value={settings.authorName} onChange={(v) => updateSetting("authorName", v)} />
                 </div>
               </div>
 
@@ -551,10 +570,9 @@ export default function HertaDashboard() {
                   <Shield className="w-4 h-4 text-[#00e676]" /> Feature Toggles
                 </h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <ToggleSetting label="Public Mode" value={settings.public} onChange={(v) => updateSetting("public", v)} desc="Allow everyone to use bot" />
+                  <ToggleSetting label="Public Mode" value={settings.isPublic} onChange={(v) => updateSetting("isPublic", v)} desc="Allow everyone to use bot" />
                   <ToggleSetting label="Anti Spam" value={settings.antiSpam} onChange={(v) => updateSetting("antiSpam", v)} desc="Block spammers automatically" />
                   <ToggleSetting label="Auto Typing" value={settings.autoTyping} onChange={(v) => updateSetting("autoTyping", v)} desc="Show typing indicator" />
-                  <ToggleSetting label="GC Only" value={settings.gcOnly} onChange={(v) => updateSetting("gcOnly", v)} desc="Only respond in groups" />
                   <ToggleSetting label="Self-Heal" value={settings.selfHealEnabled} onChange={toggleSelfHeal} desc="Auto-fix plugin errors" />
                   <ToggleSetting label="Auto Fix" value={settings.selfHealAutoFix} onChange={(v) => updateSetting("selfHealAutoFix", v)} desc="Fix without confirmation" />
                 </div>
