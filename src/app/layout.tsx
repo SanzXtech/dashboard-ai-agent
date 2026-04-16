@@ -14,8 +14,11 @@ const geistMono = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Herta V3 — Self-Heal Dashboard",
-  description: "WhatsApp Bot Control Panel & Self-Heal AI Agent Monitor",
+  title: "Herta V3 — AI Dashboard & Self-Heal Monitor",
+  description: "Advanced WhatsApp Bot Control Panel with AI Self-Heal Agent, Real-time Analytics, and System Monitoring",
+  icons: {
+    icon: "/favicon.ico",
+  },
 };
 
 export default function RootLayout({
@@ -24,8 +27,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+    <html lang="en" className="dark">
+      <body className={`${geistSans.variable} ${geistMono.variable} antialiased bg-[#06070a]`}>
         {children}
       </body>
     </html>
