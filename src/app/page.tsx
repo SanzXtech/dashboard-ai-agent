@@ -61,6 +61,12 @@ interface BotSettings {
 }
 
 // ═══════════════════════════════════════════════════════════
+// CONFIG — Auto-connect settings
+// ═══════════════════════════════════════════════════════════
+const DEFAULT_BOT_URL = process.env.NEXT_PUBLIC_BOT_API_URL || "";
+const DEFAULT_API_KEY = process.env.NEXT_PUBLIC_BOT_API_KEY || "selfheal-dashboard";
+
+// ═══════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════
 const formatBytes = (bytes: number) => {
@@ -92,8 +98,9 @@ const getTime = () => {
 // MAIN COMPONENT
 // ═══════════════════════════════════════════════════════════
 export default function HertaDashboard() {
+  // Try to load saved URL from localStorage, fall back to env default
   const [apiUrl, setApiUrl] = useState("");
-  const [apiKey, setApiKey] = useState("selfheal-dashboard");
+  const [apiKey, setApiKey] = useState(DEFAULT_API_KEY);
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [activeTab, setActiveTab] = useState<"overview" | "selfheal" | "settings" | "terminal">("overview");
@@ -103,20 +110,30 @@ export default function HertaDashboard() {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [events, setEvents] = useState<SelfHealEvent[]>([]);
   const [commandInput, setCommandInput] = useState("");
-  const [commandOutput, setCommandOutput] = useState<string[]>(["> Dashboard ready. Connect to bot to start."]);
-  const [showApiConfig, setShowApiConfig] = useState(true);
+  const [commandOutput, setCommandOutput] = useState<string[]>(["> Dashboard ready. Auto-connecting..."]);
+  const [showApiConfig, setShowApiConfig] = useState(false);
   const [selfHealStatus, setSelfHealStatus] = useState<any>(null);
+  const [autoConnectAttempted, setAutoConnectAttempted] = useState(false);
 
   const logEndRef = useRef<HTMLDivElement>(null);
   const cmdEndRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const pollRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Load saved config from localStorage on mount
+  useEffect(() => {
+    const savedUrl = typeof window !== "undefined" ? localStorage.getItem("bot_api_url") : null;
+    const savedKey = typeof window !== "undefined" ? localStorage.getItem("bot_api_key") : null;
+    setApiUrl(savedUrl || DEFAULT_BOT_URL);
+    if (savedKey) setApiKey(savedKey);
+  }, []);
+
   // ── API Fetch Helper ──
   const apiFetch = useCallback(
-    async (path: string, opts: RequestInit = {}) => {
-      if (!apiUrl) throw new Error("Not configured");
-      const url = `${apiUrl}/api/dashboard${path}${path.includes("?") ? "&" : "?"}key=${apiKey}`;
+    async (urlPath: string, opts: RequestInit = {}, customUrl?: string) => {
+      const baseUrl = customUrl || apiUrl;
+      if (!baseUrl) throw new Error("Bot URL not configured");
+      const url = `${baseUrl}/api/dashboard${urlPath}${urlPath.includes("?") ? "&" : "?"}key=${apiKey}`;
       const res = await fetch(url, {
         ...opts,
         headers: { "Content-Type": "application/json", "X-API-Key": apiKey, ...opts.headers },
@@ -128,31 +145,43 @@ export default function HertaDashboard() {
   );
 
   // ── Connect to Bot ──
-  const connectToBot = useCallback(async () => {
-    if (!apiUrl) return;
+  const connectToBot = useCallback(async (overrideUrl?: string) => {
+    const targetUrl = overrideUrl || apiUrl;
+    if (!targetUrl) {
+      // No URL configured — show config panel
+      setShowApiConfig(true);
+      setLogs((p) => [...p, { time: getTime(), type: "WARN", source: "SYS", text: "Bot URL belum diset. Masukkan URL bot Heroku kamu." }]);
+      return;
+    }
     setConnecting(true);
     try {
-      const data = await apiFetch("/stats");
+      const data = await apiFetch("/stats", {}, targetUrl);
       setStatus(data);
       setConnected(true);
       setShowApiConfig(false);
       setLogs((p) => [...p, { time: getTime(), type: "SUCC", source: "SYS", text: `Connected to ${data.bot.name}` }]);
 
+      // Save successful URL
+      if (typeof window !== "undefined") {
+        localStorage.setItem("bot_api_url", targetUrl);
+        localStorage.setItem("bot_api_key", apiKey);
+      }
+
       // Load settings
       try {
-        const s = await apiFetch("/settings");
+        const s = await apiFetch("/settings", {}, targetUrl);
         setSettings(s);
       } catch {}
 
       // Load self-heal status
       try {
-        const sh = await apiFetch("/selfheal/status");
+        const sh = await apiFetch("/selfheal/status", {}, targetUrl);
         setSelfHealStatus(sh);
       } catch {}
 
       // Load activity logs
       try {
-        const logData = await apiFetch("/logs");
+        const logData = await apiFetch("/logs", {}, targetUrl);
         if (Array.isArray(logData)) {
           setLogs((p) => [...p, ...logData.map((l: any) => ({
             time: new Date(l.time).toLocaleTimeString("id-ID"),
@@ -165,7 +194,7 @@ export default function HertaDashboard() {
 
       // Start SSE
       if (eventSourceRef.current) eventSourceRef.current.close();
-      const es = new EventSource(`${apiUrl}/api/dashboard/events?key=${apiKey}`);
+      const es = new EventSource(`${targetUrl}/api/dashboard/events?key=${apiKey}`);
       es.onmessage = (e) => {
         try {
           const msg = JSON.parse(e.data);
@@ -175,8 +204,7 @@ export default function HertaDashboard() {
             const l = msg.data;
             setLogs((p) => [...p.slice(-99), { time: new Date(l.time).toLocaleTimeString("id-ID"), type: l.type, source: l.source, text: l.text }]);
           } else if (msg.event === "plan" || msg.event === "plan_update") {
-            // Refresh plans
-            apiFetch("/plans").then((p: Plan[]) => setPlans(p)).catch(() => {});
+            apiFetch("/plans", {}, targetUrl).then((p: Plan[]) => setPlans(p)).catch(() => {});
           } else if (msg.event === "setting_change") {
             setLogs((p) => [...p, { time: getTime(), type: "INFO", source: "SSE", text: `Setting changed: ${msg.data.key} = ${msg.data.value}` }]);
           } else if (msg.event === "restart") {
@@ -194,7 +222,7 @@ export default function HertaDashboard() {
       if (pollRef.current) clearInterval(pollRef.current);
       pollRef.current = setInterval(async () => {
         try {
-          const d = await apiFetch("/stats");
+          const d = await apiFetch("/stats", {}, targetUrl);
           setStatus(d);
         } catch {
           setConnected(false);
@@ -203,10 +231,34 @@ export default function HertaDashboard() {
     } catch (err: any) {
       setLogs((p) => [...p, { time: getTime(), type: "ERR", source: "SYS", text: `Connection failed: ${err.message}` }]);
       setConnected(false);
+      // Show config if auto-connect failed
+      setShowApiConfig(true);
     } finally {
       setConnecting(false);
     }
   }, [apiUrl, apiKey, apiFetch]);
+
+  // ── Auto-connect on mount ──
+  useEffect(() => {
+    if (autoConnectAttempted) return;
+    setAutoConnectAttempted(true);
+
+    // Small delay to allow state to settle
+    const timer = setTimeout(() => {
+      const savedUrl = typeof window !== "undefined" ? localStorage.getItem("bot_api_url") : null;
+      const targetUrl = savedUrl || DEFAULT_BOT_URL;
+      if (targetUrl) {
+        setApiUrl(targetUrl);
+        setLogs((p) => [...p, { time: getTime(), type: "INFO", source: "SYS", text: `Auto-connecting to ${targetUrl}...` }]);
+        connectToBot(targetUrl);
+      } else {
+        setShowApiConfig(true);
+        setLogs((p) => [...p, { time: getTime(), type: "WARN", source: "SYS", text: "Masukkan URL bot Heroku kamu untuk memulai." }]);
+      }
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [autoConnectAttempted, connectToBot]);
 
   // ── Send Command ──
   const sendCommand = async () => {
@@ -220,12 +272,12 @@ export default function HertaDashboard() {
         method: "POST",
         body: JSON.stringify({ command: cmd, description: cmd }),
       });
-      setCommandOutput((p) => [...p, `  ${data.success ? "✅" : "❌"} ${data.message}`]);
+      setCommandOutput((p) => [...p, `  ${data.success ? "OK" : "FAIL"} ${data.message}`]);
       if (data.planId) {
-        setCommandOutput((p) => [...p, `  📋 Plan: ${data.planId}`]);
+        setCommandOutput((p) => [...p, `  Plan: ${data.planId}`]);
       }
     } catch (err: any) {
-      setCommandOutput((p) => [...p, `  ❌ Error: ${err.message}`]);
+      setCommandOutput((p) => [...p, `  Error: ${err.message}`]);
     }
   };
 
@@ -257,6 +309,15 @@ export default function HertaDashboard() {
     } catch {}
   };
 
+  // ── Save Config ──
+  const saveConfig = () => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("bot_api_url", apiUrl);
+      localStorage.setItem("bot_api_key", apiKey);
+    }
+    connectToBot(apiUrl);
+  };
+
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
@@ -280,7 +341,7 @@ export default function HertaDashboard() {
       {/* ── TOP BAR ── */}
       <header className="h-14 border-b border-[#30363d] bg-[#0d1117] flex items-center px-4 gap-4 shrink-0">
         <div className="flex items-center gap-2">
-          <div className={`w-3 h-3 rounded-full ${connected ? "bg-[#00e676] shadow-[0_0_8px_#00e676]" : "bg-[#ff1744] shadow-[0_0_8px_#ff1744]"} transition-all`} />
+          <div className={`w-3 h-3 rounded-full ${connected ? "bg-[#00e676] shadow-[0_0_8px_#00e676]" : connecting ? "bg-[#ff9800] shadow-[0_0_8px_#ff9800] animate-pulse" : "bg-[#ff1744] shadow-[0_0_8px_#ff1744]"} transition-all`} />
           <Bot className="w-5 h-5 text-[#00e5ff]" />
           <span className="font-bold text-sm text-white">{status?.bot?.name || "Herta V3"}</span>
           <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#00e5ff]/10 text-[#00e5ff] border border-[#00e5ff]/30 font-mono">
@@ -296,42 +357,53 @@ export default function HertaDashboard() {
             <div className="flex items-center gap-1"><Layers className="w-3 h-3 text-[#00e676]" /> {status.bot.pluginCount} plugins</div>
           </div>
         )}
-        <button onClick={() => setShowApiConfig(!showApiConfig)} className="p-1.5 rounded hover:bg-[#21262d] transition-colors">
+        {connecting && (
+          <div className="flex items-center gap-2 text-xs text-[#ff9800]">
+            <Loader2 className="w-3 h-3 animate-spin" />
+            <span>Connecting...</span>
+          </div>
+        )}
+        <button onClick={() => setShowApiConfig(!showApiConfig)} className="p-1.5 rounded hover:bg-[#21262d] transition-colors" title="Bot URL Settings">
           <Settings className="w-4 h-4 text-[#8b949e]" />
         </button>
       </header>
 
-      {/* ── API CONFIG PANEL ── */}
+      {/* ── API CONFIG PANEL (hidden by default, shown on click or when no URL) ── */}
       {showApiConfig && (
         <div className="border-b border-[#30363d] bg-[#010409] p-4 animate-slide-up">
-          <div className="max-w-2xl mx-auto flex flex-col sm:flex-row gap-3">
-            <div className="flex-1">
-              <label className="text-[10px] uppercase text-[#8b949e] font-bold mb-1 block">Bot API URL</label>
-              <input
-                value={apiUrl}
-                onChange={(e) => setApiUrl(e.target.value)}
-                placeholder="https://your-bot.herokuapp.com"
-                className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm outline-none focus:border-[#00e5ff] transition-colors"
-              />
+          <div className="max-w-2xl mx-auto">
+            <div className="text-xs text-[#8b949e] mb-3">
+              Masukkan URL bot Heroku kamu. Setelah save, dashboard akan otomatis connect.
             </div>
-            <div className="w-full sm:w-48">
-              <label className="text-[10px] uppercase text-[#8b949e] font-bold mb-1 block">API Key</label>
-              <input
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                type="password"
-                className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm outline-none focus:border-[#00e5ff] transition-colors"
-              />
-            </div>
-            <div className="flex items-end">
-              <button
-                onClick={connectToBot}
-                disabled={connecting || !apiUrl}
-                className="px-6 py-2 rounded font-bold text-sm bg-[#00e5ff] text-black hover:bg-[#00b8d4] disabled:opacity-50 transition-all flex items-center gap-2"
-              >
-                {connecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wifi className="w-4 h-4" />}
-                {connecting ? "Connecting..." : "Connect"}
-              </button>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <div className="flex-1">
+                <label className="text-[10px] uppercase text-[#8b949e] font-bold mb-1 block">Bot URL (Heroku)</label>
+                <input
+                  value={apiUrl}
+                  onChange={(e) => setApiUrl(e.target.value)}
+                  placeholder="https://nama-app-kamu.herokuapp.com"
+                  className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm outline-none focus:border-[#00e5ff] transition-colors"
+                />
+              </div>
+              <div className="w-full sm:w-48">
+                <label className="text-[10px] uppercase text-[#8b949e] font-bold mb-1 block">API Key</label>
+                <input
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  type="password"
+                  className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm outline-none focus:border-[#00e5ff] transition-colors"
+                />
+              </div>
+              <div className="flex items-end">
+                <button
+                  onClick={saveConfig}
+                  disabled={connecting || !apiUrl}
+                  className="px-6 py-2 rounded font-bold text-sm bg-[#00e5ff] text-black hover:bg-[#00b8d4] disabled:opacity-50 transition-all flex items-center gap-2"
+                >
+                  {connecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wifi className="w-4 h-4" />}
+                  {connecting ? "Connecting..." : "Save & Connect"}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -371,14 +443,29 @@ export default function HertaDashboard() {
 
         {/* ── CONTENT AREA ── */}
         <main className="flex-1 overflow-y-auto p-4 md:p-6">
-          {!connected && !showApiConfig && (
+          {/* Not connected state — auto-reconnect */}
+          {!connected && !connecting && !showApiConfig && (
             <div className="flex flex-col items-center justify-center h-full text-[#8b949e]">
               <WifiOff className="w-12 h-12 mb-4" />
-              <p className="text-lg font-semibold">Not Connected</p>
-              <p className="text-sm mt-1">Configure bot API URL to connect</p>
-              <button onClick={() => setShowApiConfig(true)} className="mt-4 px-4 py-2 bg-[#21262d] rounded text-sm hover:bg-[#30363d]">
-                Configure
-              </button>
+              <p className="text-lg font-semibold">Disconnected</p>
+              <p className="text-sm mt-1">Bot sedang offline atau URL belum diset</p>
+              <div className="flex gap-3 mt-4">
+                <button onClick={() => connectToBot()} className="px-4 py-2 bg-[#00e5ff] text-black rounded text-sm font-bold hover:bg-[#00b8d4] flex items-center gap-2">
+                  <RefreshCw className="w-4 h-4" /> Reconnect
+                </button>
+                <button onClick={() => setShowApiConfig(true)} className="px-4 py-2 bg-[#21262d] rounded text-sm hover:bg-[#30363d]">
+                  Settings
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Connecting state */}
+          {connecting && !connected && (
+            <div className="flex flex-col items-center justify-center h-full text-[#8b949e]">
+              <Loader2 className="w-12 h-12 mb-4 animate-spin text-[#00e5ff]" />
+              <p className="text-lg font-semibold">Connecting to Bot...</p>
+              <p className="text-sm mt-1">Menghubungkan ke {apiUrl}</p>
             </div>
           )}
 
@@ -469,9 +556,9 @@ export default function HertaDashboard() {
                   </button>
                 </div>
                 <div className="grid grid-cols-3 gap-4">
-                  <AgentCard emoji="🔍" name="Mistral" role="Analyst" desc="Error diagnosis" active={!!selfHealStatus?.aiAgents?.analyst?.status?.includes("✅")} />
-                  <AgentCard emoji="🔧" name="Cohere" role="Fixer" desc="Code generation" active={!!selfHealStatus?.aiAgents?.fixer?.status?.includes("✅")} />
-                  <AgentCard emoji="🧪" name="OpenRouter" role="Tester" desc="Validation" active={!!selfHealStatus?.aiAgents?.tester?.status?.includes("✅")} />
+                  <AgentCard emoji="🔍" name="Mistral" role="Analyst" desc="Error diagnosis" active={!!selfHealStatus?.aiAgents?.analyst?.status?.includes("OK")} />
+                  <AgentCard emoji="🔧" name="Cohere" role="Fixer" desc="Code generation" active={!!selfHealStatus?.aiAgents?.fixer?.status?.includes("OK")} />
+                  <AgentCard emoji="🧪" name="OpenRouter" role="Tester" desc="Validation" active={!!selfHealStatus?.aiAgents?.tester?.status?.includes("OK")} />
                 </div>
               </div>
 
@@ -529,7 +616,7 @@ export default function HertaDashboard() {
                 </p>
                 <div className="flex-1 bg-[#010409] border border-[#30363d] rounded-lg p-4 font-mono text-xs overflow-y-auto min-h-[300px]">
                   {commandOutput.map((line, i) => (
-                    <div key={i} className={`mb-1 ${line.startsWith(">") ? "text-[#00e5ff]" : line.includes("✅") ? "text-[#00e676]" : line.includes("❌") ? "text-[#ff1744]" : "text-[#8b949e]"}`}>
+                    <div key={i} className={`mb-1 ${line.startsWith(">") ? "text-[#00e5ff]" : line.includes("OK") ? "text-[#00e676]" : line.includes("Error") || line.includes("FAIL") ? "text-[#ff1744]" : "text-[#8b949e]"}`}>
                       {line}
                     </div>
                   ))}
