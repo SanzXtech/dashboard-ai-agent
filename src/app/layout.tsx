@@ -14,8 +14,8 @@ const geistMono = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Nexus Swarm Dashboard",
-  description: "AI-Powered Swarm Pipeline Dashboard",
+  title: "Herta V3 — Self-Heal Dashboard",
+  description: "WhatsApp Bot Control Panel & Self-Heal AI Agent Monitor",
 };
 
 export default function RootLayout({
@@ -25,9 +25,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
+      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
         {children}
       </body>
     </html>

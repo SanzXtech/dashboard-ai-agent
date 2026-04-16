@@ -1,249 +1,647 @@
 "use client";
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import {
+  Bot, Cpu, HardDrive, Activity, Settings, Shield, Terminal,
+  RefreshCw, Power, Wifi, WifiOff, ChevronRight, Send,
+  Zap, Users, MessageSquare, Clock, MemoryStick, Server,
+  Eye, EyeOff, Wrench, CheckCircle2, XCircle, AlertTriangle,
+  Loader2, ArrowUpCircle, Globe, Hash, Code2, Layers,
+} from "lucide-react";
 
-const globalStyles = `
-  :root {
-      --bg-base: #06070a; --bg-panel: #0d1117; --bg-darker: #010409; --border-color: #30363d;
-      --text-main: #c9d1d9; --text-muted: #8b949e;
-      --accent-cyan: #00e5ff; --accent-blue: #2979ff; --accent-green: #00e676; --accent-red: #ff1744;
-  }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: var(--bg-base); color: var(--text-main); font-family: system-ui, sans-serif; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
-  ::-webkit-scrollbar { width: 5px; height: 5px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
+// ═══════════════════════════════════════════════════════════
+// TYPES
+// ═══════════════════════════════════════════════════════════
+interface BotStatus {
+  bot: { name: string; number: string; owner: string; ownerName: string; prefix: string; public: boolean; connection: string; uptime: number; version: string };
+  memory: { rss: number; heapUsed: number; heapTotal: number; external: number };
+  stats: { totalPlugins: number; totalUsers: number; totalChats: number; hitToday: string };
+  selfHeal: { enabled: boolean; autoFix: boolean };
+  timestamp: number;
+}
 
-  /* Plan Animations */
-  .plan-icon { width: 16px; height: 16px; display: flex; align-items: center; justify-content: center; border-radius: 50%; border: 2px solid currentColor; flex-shrink: 0; }
-  .step-pending .plan-icon { opacity: 0.3; }
-  .step-loading { color: var(--accent-cyan); text-shadow: 0 0 8px rgba(0,229,255,0.4);}
-  .step-loading .plan-icon { border-color: var(--accent-cyan); border-top-color: transparent; animation: spin 1s linear infinite; box-shadow: 0 0 10px rgba(0,229,255,0.2);}
-  .step-done { color: var(--accent-green); }
-  .step-done .plan-icon { background: var(--accent-green); border-color: var(--accent-green); color: #000; box-shadow: 0 0 8px rgba(0,230,118,0.3);}
-  .step-done .plan-icon::before { content: '✓'; font-size: 10px; font-weight: 900;}
-  .step-error { color: var(--accent-red); text-shadow: 0 0 8px rgba(255,23,68,0.4);}
-  .step-error .plan-icon { background: var(--accent-red); border-color: var(--accent-red); color: #fff;}
-  .step-error .plan-icon::before { content: '!'; font-size: 10px; font-weight: 900;}
-  @keyframes spin { 100% { transform: rotate(360deg); } }
+interface SelfHealEvent {
+  type: string;
+  timestamp: number;
+  [key: string]: any;
+}
 
-  /* Cables Animation */
-  .dynamic-cable { stroke-width: 3; fill: none; stroke-linejoin: round; }
-  .cable-flow { stroke-dasharray: 8 8; animation: dataFlowAnim 0.4s linear infinite; }
-  .cable-flow-reverse { stroke-dasharray: 8 8; animation: dataFlowReverseAnim 0.4s linear infinite; }
-  @keyframes dataFlowAnim { to { stroke-dashoffset: -16; } }
-  @keyframes dataFlowReverseAnim { to { stroke-dashoffset: 16; } }
+interface LogEntry {
+  time: string;
+  type: "INFO" | "WARN" | "ERR" | "SUCC" | "FIX" | "TEST";
+  source: string;
+  text: string;
+}
 
-  /* Robot Animations */
-  @keyframes scanEye { 0% { transform: scaleX(1); } 100% { transform: scaleX(0.4); } }
-  @keyframes typing { 0% { width: 20%; } 100% { width: 80%; } }
-  @keyframes floatAlert { 0% { transform: translateY(0); } 100% { transform: translateY(-3px); } }
-  @keyframes slideUp { from { transform: translateY(5px); opacity: 0; } to { transform: translateY(0); opacity: 0.8; } }
-`;
+interface PlanStep {
+  id: number;
+  label: string;
+  status: "pending" | "loading" | "done" | "error";
+  detail?: string;
+}
 
-const getTime = () => { const d = new Date(); return `[${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}]`; };
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+interface Plan {
+  id: string;
+  title: string;
+  steps: PlanStep[];
+  status: "active" | "completed" | "failed";
+  createdAt: number;
+}
 
-export default function NexusSwarmDashboard() {
-    const [activeTab, setActiveTab] = useState('chat');
-    const [messages, setMessages] = useState<any[]>([{ sender: 'Manager (Nexus-Core)', text: 'Routing sirkuit Manhattan aktif. Kabel disembunyikan di bawah meja. Siap menerima instruksi.', isUser: false }]);
-    const [logs, setLogs] = useState<any[]>([{ time: getTime(), type: 'SUCC', source: 'SYS', text: 'Sirkuit Manhattan aktif. Node siap.' }]);
-    const [terminalMsg, setTerminalMsg] = useState('> Kernel Idle... Waiting for I/O');
-    const [isProcessing, setIsProcessing] = useState(false);
-    const [plan, setPlan] = useState<any[]>([]);
-    const [robots, setRobots] = useState<any>({});
-    const [cables, setCables] = useState<any[]>([]);
-    const [device, setDevice] = useState('mobile');
-    const [inputVal, setInputVal] = useState('');
-    const [iframeContent, setIframeContent] = useState("<html style='background:#0d1117; color:#00e5ff; display:flex; align-items:center; justify-content:center; font-family:monospace;'><body><p>> RENDER ENGINE READY</p></body></html>");
+interface BotSettings {
+  botName: string;
+  ownerName: string;
+  prefix: string;
+  public: boolean;
+  autoTyping: boolean;
+  antiSpam: boolean;
+  gcOnly: boolean;
+  selfHealEnabled: boolean;
+  selfHealAutoFix: boolean;
+  packName: string;
+  authorName: string;
+}
 
-    const robotRefs = useRef<{[key: string]: HTMLDivElement | null}>({});
-    const containerRef = useRef<HTMLDivElement>(null);
-    const chatEndRef = useRef<HTMLDivElement>(null);
-    const logEndRef = useRef<HTMLDivElement>(null);
-    const devWrapperRef = useRef<HTMLDivElement>(null);
-    const previewContRef = useRef<HTMLDivElement>(null);
+// ═══════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════
+const formatBytes = (bytes: number) => {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / 1048576).toFixed(1) + " MB";
+};
 
-    useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, plan]);
-    useEffect(() => { logEndRef.current?.scrollIntoView(); }, [logs]);
+const formatUptime = (ms: number) => {
+  if (!ms || ms <= 0) return "0s";
+  const d = Math.floor(ms / 86400000);
+  const h = Math.floor(ms / 3600000) % 24;
+  const m = Math.floor(ms / 60000) % 60;
+  const s = Math.floor(ms / 1000) % 60;
+  const p: string[] = [];
+  if (d > 0) p.push(`${d}d`);
+  if (h > 0) p.push(`${h}h`);
+  if (m > 0) p.push(`${m}m`);
+  p.push(`${s}s`);
+  return p.join(" ");
+};
 
-    const updateScale = () => {
-        if (!previewContRef.current || !devWrapperRef.current) return;
-        let tW = 375, tH = 812; 
-        if (device === 'tablet') { tW = 768; tH = 1024; }
-        else if (device === 'desktop') { tW = 1280; tH = 720; } 
-        let scale = Math.min((previewContRef.current.clientWidth * 0.85) / tW, (previewContRef.current.clientHeight * 0.85) / tH);
-        if (scale > 1) scale = 1; 
-        devWrapperRef.current.style.transform = `scale(${scale})`;
-    };
-    useEffect(() => { updateScale(); window.addEventListener('resize', updateScale); return () => window.removeEventListener('resize', updateScale); }, [device, activeTab]);
+const getTime = () => {
+  const d = new Date();
+  return `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}:${d.getSeconds().toString().padStart(2, "0")}`;
+};
 
-    const setRobotRefs = (id: string, el: HTMLDivElement | null) => { robotRefs.current[id] = el; };
-    const addLog = (type: string, source: string, text: string) => setLogs(prev => [...prev, { time: getTime(), type, source, text }]);
-    const updatePlan = (idx: number, status: string) => setPlan(prev => { const n = [...prev]; if(n[idx]) n[idx].status = status; return n; });
+// ═══════════════════════════════════════════════════════════
+// MAIN COMPONENT
+// ═══════════════════════════════════════════════════════════
+export default function HertaDashboard() {
+  const [apiUrl, setApiUrl] = useState("");
+  const [apiKey, setApiKey] = useState("herta-v3-dashboard-2024");
+  const [connected, setConnected] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [activeTab, setActiveTab] = useState<"overview" | "selfheal" | "settings" | "terminal">("overview");
+  const [status, setStatus] = useState<BotStatus | null>(null);
+  const [settings, setSettings] = useState<BotSettings | null>(null);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [plans, setPlans] = useState<Plan[]>([]);
+  const [events, setEvents] = useState<SelfHealEvent[]>([]);
+  const [commandInput, setCommandInput] = useState("");
+  const [commandOutput, setCommandOutput] = useState<string[]>(["> Dashboard ready. Connect to bot to start."]);
+  const [showApiConfig, setShowApiConfig] = useState(true);
+  const [selfHealStatus, setSelfHealStatus] = useState<any>(null);
 
-    const calculateOrthogonalPath = (fromId: string, toId: string) => {
-        const fromEl = robotRefs.current[fromId];
-        const toEl = robotRefs.current[toId];
-        const container = containerRef.current;
-        if (!fromEl || !toEl || !container) return "";
-        const r1 = fromEl.getBoundingClientRect();
-        const r2 = toEl.getBoundingClientRect();
-        const cRect = container.getBoundingClientRect();
-        const x1 = (r1.left + r1.width / 2) - cRect.left;
-        const y1 = r1.bottom - cRect.top - 5; 
-        const x2 = (r2.left + r2.width / 2) - cRect.left;
-        const y2 = r2.bottom - cRect.top - 5;
-        const isSameRow = Math.abs(y1 - y2) < 20;
-        if (isSameRow) {
-            const dropY = Math.max(y1, y2) + 25; 
-            return `M ${x1} ${y1} L ${x1} ${dropY} L ${x2} ${dropY} L ${x2} ${y2}`;
-        } else {
-            const midY = y1 + (y2 - y1) / 2; 
-            return `M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}`;
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const cmdEndRef = useRef<HTMLDivElement>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const pollRef = useRef<NodeJS.Timeout | null>(null);
+
+  // ── API Fetch Helper ──
+  const apiFetch = useCallback(
+    async (path: string, opts: RequestInit = {}) => {
+      if (!apiUrl) throw new Error("Not configured");
+      const url = `${apiUrl}${path}${path.includes("?") ? "&" : "?"}key=${apiKey}`;
+      const res = await fetch(url, {
+        ...opts,
+        headers: { "Content-Type": "application/json", "X-Dashboard-Key": apiKey, ...opts.headers },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    },
+    [apiUrl, apiKey]
+  );
+
+  // ── Connect to Bot ──
+  const connectToBot = useCallback(async () => {
+    if (!apiUrl) return;
+    setConnecting(true);
+    try {
+      const data = await apiFetch("/api/status");
+      setStatus(data);
+      setConnected(true);
+      setShowApiConfig(false);
+      setLogs((p) => [...p, { time: getTime(), type: "SUCC", source: "SYS", text: `Connected to ${data.bot.name}` }]);
+
+      // Load settings
+      try {
+        const s = await apiFetch("/api/settings");
+        setSettings(s);
+      } catch {}
+
+      // Load self-heal status
+      try {
+        const sh = await apiFetch("/api/selfheal/status");
+        setSelfHealStatus(sh);
+        if (sh.events) setEvents(sh.events);
+      } catch {}
+
+      // Start SSE
+      if (eventSourceRef.current) eventSourceRef.current.close();
+      const es = new EventSource(`${apiUrl}/api/events?key=${apiKey}`);
+      es.addEventListener("selfheal", (e) => {
+        try {
+          const ev = JSON.parse(e.data);
+          setEvents((p) => [...p.slice(-99), ev]);
+          setLogs((p) => [
+            ...p.slice(-99),
+            { time: getTime(), type: ev.type === "fix_started" ? "FIX" : "INFO", source: "SelfHeal", text: JSON.stringify(ev).slice(0, 150) },
+          ]);
+        } catch {}
+      });
+      es.addEventListener("connected", () => {
+        setLogs((p) => [...p, { time: getTime(), type: "SUCC", source: "SSE", text: "Real-time stream connected" }]);
+      });
+      es.onerror = () => {
+        setLogs((p) => [...p, { time: getTime(), type: "WARN", source: "SSE", text: "Stream interrupted, reconnecting..." }]);
+      };
+      eventSourceRef.current = es;
+
+      // Start polling
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(async () => {
+        try {
+          const d = await apiFetch("/api/status");
+          setStatus(d);
+        } catch {
+          setConnected(false);
         }
+      }, 10000);
+    } catch (err: any) {
+      setLogs((p) => [...p, { time: getTime(), type: "ERR", source: "SYS", text: `Connection failed: ${err.message}` }]);
+      setConnected(false);
+    } finally {
+      setConnecting(false);
+    }
+  }, [apiUrl, apiKey, apiFetch]);
+
+  // ── Send Command ──
+  const sendCommand = async () => {
+    if (!commandInput.trim() || !connected) return;
+    const cmd = commandInput.trim();
+    setCommandInput("");
+    setCommandOutput((p) => [...p, `> ${cmd}`]);
+
+    try {
+      const data = await apiFetch("/api/selfheal/command", {
+        method: "POST",
+        body: JSON.stringify({ command: cmd }),
+      });
+      setCommandOutput((p) => [...p, `  ${data.ok ? "✅" : "❌"} ${data.message}`]);
+      if (data.plugin) {
+        setCommandOutput((p) => [...p, `  📁 Plugin: ${data.plugin}`]);
+      }
+    } catch (err: any) {
+      setCommandOutput((p) => [...p, `  ❌ Error: ${err.message}`]);
+    }
+  };
+
+  // ── Toggle Self-Heal ──
+  const toggleSelfHeal = async () => {
+    try {
+      const data = await apiFetch("/api/selfheal/toggle", { method: "POST" });
+      setSettings((p) => (p ? { ...p, selfHealEnabled: data.enabled } : p));
+      setLogs((p) => [...p, { time: getTime(), type: "SUCC", source: "Dashboard", text: `Self-Heal ${data.enabled ? "enabled" : "disabled"}` }]);
+    } catch {}
+  };
+
+  // ── Update Setting ──
+  const updateSetting = async (key: string, value: any) => {
+    try {
+      await apiFetch("/api/settings", { method: "POST", body: JSON.stringify({ [key]: value }) });
+      setSettings((p) => (p ? { ...p, [key]: value } : p));
+      setLogs((p) => [...p, { time: getTime(), type: "SUCC", source: "Dashboard", text: `Updated ${key}` }]);
+    } catch {}
+  };
+
+  // ── Restart Bot ──
+  const restartBot = async () => {
+    if (!confirm("Restart bot?")) return;
+    try {
+      await apiFetch("/api/restart", { method: "POST" });
+      setLogs((p) => [...p, { time: getTime(), type: "WARN", source: "Dashboard", text: "Bot restarting..." }]);
+      setConnected(false);
+    } catch {}
+  };
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
+
+  useEffect(() => {
+    cmdEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [commandOutput]);
+
+  useEffect(() => {
+    return () => {
+      if (eventSourceRef.current) eventSourceRef.current.close();
+      if (pollRef.current) clearInterval(pollRef.current);
     };
+  }, []);
 
-    const fireDataCable = async (fromId: string, toId: string, alertType: string, duration: number) => {
-        const pathData = calculateOrthogonalPath(fromId, toId);
-        if(!pathData) return;
-        let strokeColor = '#00e5ff'; let animClass = 'cable-flow';
-        if(alertType === 'error') { strokeColor = '#ff1744'; animClass = 'cable-flow-reverse'; } 
-        else if(alertType === 'success') { strokeColor = '#00e676'; }
-        const newCable = { id: Date.now() + Math.random(), d: pathData, color: strokeColor, animClass };
-        setCables(prev => [...prev, newCable]);
-        setRobots(prev => ({...prev, [toId]: { active: true, alert: alertType }}));
-        await sleep(duration);
-        setCables(prev => prev.filter(c => c.id !== newCable.id));
-    };
+  // ═══════════════════════════════════════════════════════════
+  // RENDER
+  // ═══════════════════════════════════════════════════════════
+  return (
+    <div className="min-h-screen bg-[#06070a] text-[#c9d1d9] flex flex-col">
+      {/* ── TOP BAR ── */}
+      <header className="h-14 border-b border-[#30363d] bg-[#0d1117] flex items-center px-4 gap-4 shrink-0">
+        <div className="flex items-center gap-2">
+          <div className={`w-3 h-3 rounded-full ${connected ? "bg-[#00e676] shadow-[0_0_8px_#00e676]" : "bg-[#ff1744] shadow-[0_0_8px_#ff1744]"} transition-all`} />
+          <Bot className="w-5 h-5 text-[#00e5ff]" />
+          <span className="font-bold text-sm text-white">{status?.bot?.name || "Herta V3"}</span>
+          <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#00e5ff]/10 text-[#00e5ff] border border-[#00e5ff]/30 font-mono">
+            v{status?.bot?.version || "3.0"}
+          </span>
+        </div>
+        <div className="flex-1" />
+        {connected && status && (
+          <div className="hidden md:flex items-center gap-4 text-xs text-[#8b949e]">
+            <div className="flex items-center gap-1"><Clock className="w-3 h-3" /> {formatUptime(status.bot.uptime)}</div>
+            <div className="flex items-center gap-1"><MemoryStick className="w-3 h-3" /> {status.memory.rss}MB</div>
+            <div className="flex items-center gap-1"><Users className="w-3 h-3" /> {status.stats.totalUsers}</div>
+            <div className="flex items-center gap-1"><Zap className="w-3 h-3 text-yellow-400" /> {status.stats.hitToday}</div>
+          </div>
+        )}
+        <button onClick={() => setShowApiConfig(!showApiConfig)} className="p-1.5 rounded hover:bg-[#21262d] transition-colors">
+          <Settings className="w-4 h-4 text-[#8b949e]" />
+        </button>
+      </header>
 
-    const handleCommand = async () => {
-        if (!inputVal.trim() || isProcessing) return;
-        setIsProcessing(true);
-        setMessages(prev => [...prev, { text: inputVal, isUser: true }]);
-        setInputVal('');
-        if (window.innerWidth <= 1024) setActiveTab('office');
-
-        const initialPlan = [
-            { label: '[UI] Generate Layout & Assets', status: 'pending' },
-            { label: '[Front] Build Responsive HTML/CSS', status: 'pending' },
-            { label: '[Back] Create Logic & DB Simulation', status: 'pending' },
-            { label: '[QA] Security Loop Injection Test', status: 'pending' },
-            { label: '[DevOps] Containerize & Deploy', status: 'pending' }
-        ];
-        setPlan(initialPlan);
-        setTerminalMsg('> Parsing Instructions... Pipeline Start.');
-        await sleep(1000);
-
-        // 1. UI
-        updatePlan(0, 'loading'); setRobots({ ui: { active: true } }); setTerminalMsg('> UI: Designing structure...');
-        addLog('INFO', 'NODE-UI', 'Mendesain layout dasar.');
-        await sleep(1500);
-        updatePlan(0, 'done'); setTerminalMsg('> Pipeline: UI -> Frontend');
-        await fireDataCable('ui', 'front', 'normal', 1000); setRobots({ ui: { active: false } });
-
-        // 2. Frontend
-        updatePlan(1, 'loading'); setRobots({ front: { active: true } }); setTerminalMsg('> Frontend: Applying Flexbox...');
-        addLog('INFO', 'NODE-FR', 'Menerapkan gaya responsif penuh.');
-        await sleep(1500);
-        updatePlan(1, 'done'); setTerminalMsg('> Pipeline: Frontend -> Backend');
-        await fireDataCable('front', 'back', 'normal', 1000); setRobots({ front: { active: false } });
-
-        // 3. Backend
-        updatePlan(2, 'loading'); setRobots({ back: { active: true } }); setTerminalMsg('> Backend: Writing Handlers...');
-        addLog('INFO', 'NODE-BK', 'Membuat modul Autentikasi.');
-        await sleep(1500); updatePlan(2, 'done');
-
-        // 4. QA Loop
-        updatePlan(3, 'loading'); setTerminalMsg('> Testing: Backend -> QA');
-        await fireDataCable('back', 'qa', 'normal', 800); 
-        setRobots({ back: { active: false }, qa: { active: true, alert: 'error' } }); updatePlan(3, 'error');
-        setTerminalMsg('> QA: Security Flaw (XSS Detected)!'); addLog('ERR', 'NODE-QA', 'Celah keamanan script ditemukan.');
-        await sleep(1000);
-        setTerminalMsg('> Reject: QA -> Backend');
-        await fireDataCable('qa', 'back', 'error', 800); 
-        setRobots({ qa: { active: false }, back: { active: true, alert: 'error' } }); updatePlan(3, 'loading');
-        setTerminalMsg('> Backend: Patching with Regex/Escape...'); addLog('WARN', 'NODE-BK', 'Memperbaiki kode input HTML Entities.');
-        await sleep(1500);
-        setRobots({ back: { active: true } }); setTerminalMsg('> Re-Test: Backend -> QA');
-        await fireDataCable('back', 'qa', 'success', 800); 
-        setRobots({ back: { active: false }, qa: { active: true, alert: 'success' } }); updatePlan(3, 'done');
-        setTerminalMsg('> QA: Approved. Fully Secure.'); addLog('SUCC', 'NODE-QA', 'Validasi berhasil. Sistem 100% aman.');
-        await sleep(1000);
-
-        // 5. DevOps
-        setTerminalMsg('> Pipeline: QA -> DevOps');
-        await fireDataCable('qa', 'dev', 'normal', 1000); setRobots({ qa: { active: false } });
-        updatePlan(4, 'loading'); setRobots({ dev: { active: true } }); setTerminalMsg('> DevOps: Deploying...');
-        addLog('INFO', 'NODE-DV', 'Mengeksekusi build final ke Vercel Preview.');
-        await sleep(1500); setRobots({ dev: { active: false } }); updatePlan(4, 'done');
-
-        setTerminalMsg('> System Idle. Pipeline completed.');
-        setMessages(prev => [...prev, { sender: 'Manager (Nexus)', text: `<b>Pipeline Selesai!</b><br>Render tersedia di panel Result.`, isUser: false }]);
-        setIframeContent(`<!DOCTYPE html><html lang="id"><head><meta charset="viewport" content="width=device-width, initial-scale=1.0"><style>:root { --pr: #00e5ff; --bg: #0d1117; --txt: #c9d1d9; --card: #161b22; } * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, sans-serif; } body { background: var(--bg); color: var(--txt); } nav { display: flex; justify-content: space-between; padding: 1.5rem 5%; background: var(--card); border-bottom: 1px solid #30363d; align-items:center;} .logo { font-size: 1.2rem; font-weight: bold; color: var(--pr); display: flex; gap: 10px; align-items: center;} .hero { text-align: center; padding: 4rem 1rem; } .hero h1 { font-size: 2.5rem; margin-bottom: 1rem; color: #fff;} .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 2rem; padding: 2rem 5%; } .card { background: var(--card); padding: 2rem; border-radius: 12px; border: 1px solid #30363d; text-align: left; } .card h3 { color: #fff; margin-bottom: 10px;} .badge { display: inline-block; padding: 4px 8px; background: rgba(0, 230, 118, 0.15); color: #00e676; border: 1px solid rgba(0, 230, 118, 0.4); border-radius: 12px; font-size: 0.8rem; margin-bottom: 1rem;} .input { width: 100%; padding: 0.8rem; margin: 0.5rem 0 1rem; background: #010409; border: 1px solid #30363d; color: #fff; border-radius: 6px; outline: none;} .btn { width: 100%; background: var(--pr); color: #000; padding: 0.8rem; border: none; border-radius: 6px; font-weight: bold; cursor: pointer;}</style></head><body><nav><div class="logo">NEXUS APP</div><div style="font-size:0.9rem; color:#00e676;">Status: Connected</div></nav><div class="hero"><h1>E-Commerce Landing Page</h1><p style="color:#8b949e; max-width: 600px; margin: auto;">Tampilan Flexbox sejajar berhasil diterapkan oleh Frontend.</p></div><div class="grid"><div class="card"><div class="badge">QA Sec-Approved</div><h3>Form Test</h3><p style="font-size:0.9rem; color:#8b949e; margin-bottom: 1rem;">Diuji oleh QA Node. Coba eksekusi script ini.</p><input type="text" class="input" value="&lt;script&gt;alert('hack')&lt;/script&gt;"><button class="btn" onclick="alert('Input aman! Component React melakukan escape.')">Kirim Data</button></div><div class="card" style="display:flex; flex-direction:column; justify-content:center; align-items:center; text-align:center;"><h1 style="font-size:3rem; color: #00e676;">OK</h1><p style="color:#8b949e;">Lolos Rendering Vercel</p></div></div></body></html>`);
-        if (window.innerWidth <= 1024) setActiveTab('preview');
-        setIsProcessing(false);
-    };
-
-    const renderRobot = (id: string, label: string) => {
-        const state = robots[id] || { active: false, alert: null };
-        const isActive = state.active; const isErr = state.alert === 'error'; const isSucc = state.alert === 'success';
-        return (
-            <div id={`bot-${id}`} ref={el => setRobotRefs(id, el)} className={`w-[75px] h-[95px] relative flex flex-col items-center justify-end opacity-60 transition-all duration-300 grayscale-[40%] flex-shrink-0 ${isActive ? 'opacity-100 grayscale-0 -translate-y-1' : ''} ${isErr ? 'opacity-100 grayscale-0 animate-[floatAlert_0.5s_infinite_alternate]' : ''}`}>
-                <div className={`text-[0.55rem] font-mono px-2 py-0.5 rounded-xl absolute -top-3 z-20 transition-colors font-bold whitespace-nowrap ${isActive ? (isErr ? 'bg-red-500/10 text-red-500 border border-red-500 shadow-[0_0_8px_#ff1744]' : isSucc ? 'bg-green-500/10 text-green-500 border border-green-500 shadow-[0_0_8px_#00e676]' : 'bg-cyan-500/10 text-cyan-400 border border-cyan-400 shadow-[0_0_8px_#00e5ff]') : 'bg-[#010409] text-gray-400 border border-[#30363d]'}`}>{label}</div>
-                <div className={`w-[22px] h-[18px] bg-[#0f172a] border border-[#334155] rounded absolute bottom-[45px] z-[6] flex justify-center items-center transition-all ${isActive ? '-translate-y-0.5 border-cyan-400' : ''} ${isErr ? 'border-red-500' : ''}`}><div className={`w-[12px] h-[4px] rounded-[2px] transition-all opacity-50 ${isActive ? (isErr ? 'bg-red-500 shadow-[0_0_6px_#ff1744] opacity-100 animate-[blink_0.1s_infinite]' : isSucc ? 'bg-green-500 shadow-[0_0_6px_#00e676] opacity-100' : 'bg-cyan-400 shadow-[0_0_6px_#00e5ff] opacity-100 animate-[scanEye_2s_infinite_alternate]') : 'bg-blue-500'}`}></div></div>
-                <div className="w-[28px] h-[35px] bg-[#1e293b] rounded-t-lg absolute bottom-2 z-[5] border border-[#334155]"></div>
-                <div className={`w-[44px] h-[30px] bg-[#0a0a0a] border-2 border-[#333] rounded absolute bottom-[18px] z-[11] flex justify-center items-center overflow-hidden shadow-[0_5px_10px_rgba(0,0,0,0.6)] transition-colors ${isActive ? (isErr ? 'border-red-500' : 'border-cyan-400') : ''}`}><div className={`w-full h-full relative ${isActive ? (isErr ? 'bg-red-500/20' : 'bg-cyan-400/15') : 'bg-black'}`}>{isActive && !isErr && <div className="absolute top-[2px] left-[2px] h-[2px] bg-cyan-400 animate-[typing_1s_infinite_alternate] shadow-[0_4px_0_#00e5ff,0_8px_0_#00e5ff]"></div>}{isErr && <div className="absolute top-[2px] left-[2px] text-red-500 font-mono text-[8px] animate-[blink_0.2s_infinite]">ERR</div>}</div></div>
-                <div className="w-[70px] h-[20px] bg-gradient-to-b from-[#475569] to-[#1e293b] rounded absolute bottom-0 z-[10] border-t-2 border-[#94a3b8] border-b-4 border-[#0f172a] flex justify-center shadow-[0_10px_10px_rgba(0,0,0,0.5)]"><div className={`w-[30px] h-[4px] bg-[#111] rounded-[1px] mt-1 border-b border-[#333] ${isActive ? 'bg-cyan-400 shadow-[0_0_5px_#00e5ff]' : ''}`}></div></div>
+      {/* ── API CONFIG PANEL ── */}
+      {showApiConfig && (
+        <div className="border-b border-[#30363d] bg-[#010409] p-4 animate-slide-up">
+          <div className="max-w-2xl mx-auto flex flex-col sm:flex-row gap-3">
+            <div className="flex-1">
+              <label className="text-[10px] uppercase text-[#8b949e] font-bold mb-1 block">Bot API URL</label>
+              <input
+                value={apiUrl}
+                onChange={(e) => setApiUrl(e.target.value)}
+                placeholder="https://your-bot.herokuapp.com"
+                className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm outline-none focus:border-[#00e5ff] transition-colors"
+              />
             </div>
-        );
-    };
-
-    return (
-        <>
-            <style dangerouslySetInnerHTML={{ __html: globalStyles }} />
-            <div className="lg:hidden bg-[#0d1117] border-b border-[#30363d] relative z-[100] flex w-full">
-                {['chat', 'office', 'preview'].map((t, i) => (
-                    <button key={t} onClick={() => setActiveTab(t)} className={`flex-1 py-3 px-1 text-xs font-bold uppercase transition-all ${activeTab === t ? 'text-[#00e5ff]' : 'text-[#8b949e]'}`}>{t}</button>
-                ))}
-                <div className="absolute bottom-0 h-[3px] bg-[#00e5ff] transition-transform duration-300" style={{ width: '33.33%', transform: `translateX(${['chat', 'office', 'preview'].indexOf(activeTab) * 100}%)` }} />
+            <div className="w-full sm:w-48">
+              <label className="text-[10px] uppercase text-[#8b949e] font-bold mb-1 block">API Key</label>
+              <input
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                type="password"
+                className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm outline-none focus:border-[#00e5ff] transition-colors"
+              />
             </div>
-            
-            <div className="flex flex-col lg:flex-row h-[calc(100vh-45px)] lg:h-screen w-full relative bg-black">
-                {/* CHAT PANEL */}
-                <div className={`absolute lg:relative top-0 left-0 w-full h-full lg:w-[28%] bg-[#0d1117] flex flex-col border-r border-[#30363d] transition-all duration-300 z-10 ${activeTab === 'chat' ? 'opacity-100 translate-x-0 pointer-events-auto' : 'opacity-0 translate-x-4 pointer-events-none lg:opacity-100 lg:translate-x-0 lg:pointer-events-auto'}`}>
-                    <div className="p-3 border-b border-[#30363d] bg-gradient-to-r from-[#0d1117] to-[#010409] flex justify-between items-center text-xs font-semibold uppercase shrink-0"><div className="flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-[#00e5ff] shadow-[0_0_10px_#00e5ff]"/> Commander</div></div>
-                    <div className="flex-1 p-4 overflow-y-auto flex flex-col gap-4">
-                        {messages.map((m, i) => (<div key={i} className={`max-w-[90%] p-3 rounded-lg text-[0.85rem] ${m.isUser ? 'self-end bg-[#2979ff] text-white rounded-br-none' : 'self-start bg-[#010409] border border-[#30363d] rounded-bl-none'}`}>{!m.isUser && <div className="text-[0.7rem] text-[#00e5ff] mb-1 font-bold uppercase">{m.sender}</div>}<div dangerouslySetInnerHTML={{ __html: m.text }} /></div>))}
-                        {plan.length > 0 && (<div className="bg-black/30 border border-[#30363d] rounded-md p-3 mt-2"><div className="text-[0.75rem] text-[#8b949e] uppercase mb-2 font-bold">Execution Tracker</div>{plan.map((p, i) => (<div key={i} className={`flex items-center gap-2 mb-2 font-mono text-[0.75rem] ${p.status === 'loading' ? 'step-loading' : p.status === 'done' ? 'step-done' : p.status === 'error' ? 'step-error' : 'step-pending text-[#64748b]'}`}><div className="plan-icon"></div> {p.label}</div>))}</div>)}
-                        <div ref={chatEndRef} />
-                    </div>
-                    <div className="p-3 border-t border-[#30363d] flex gap-2 shrink-0 bg-[#010409]">
-                        <input type="text" value={inputVal} onChange={e => setInputVal(e.target.value)} onKeyDown={e => e.key==='Enter' && handleCommand()} placeholder="Instruksi..." className="flex-1 bg-[#0d1117] border border-[#30363d] text-white p-2 rounded outline-none focus:border-[#00e5ff]" disabled={isProcessing} />
-                        <button onClick={handleCommand} disabled={isProcessing} className="bg-[#2979ff] text-white px-4 rounded font-bold hover:bg-[#1c54b2]">Kirim</button>
-                    </div>
+            <div className="flex items-end">
+              <button
+                onClick={connectToBot}
+                disabled={connecting || !apiUrl}
+                className="px-6 py-2 rounded font-bold text-sm bg-[#00e5ff] text-black hover:bg-[#00b8d4] disabled:opacity-50 transition-all flex items-center gap-2"
+              >
+                {connecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wifi className="w-4 h-4" />}
+                {connecting ? "Connecting..." : "Connect"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── MAIN CONTENT ── */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* ── SIDEBAR ── */}
+        <nav className="w-14 md:w-48 bg-[#0d1117] border-r border-[#30363d] flex flex-col py-2 shrink-0">
+          {([
+            { id: "overview", icon: Activity, label: "Overview" },
+            { id: "selfheal", icon: Shield, label: "Self-Heal AI" },
+            { id: "terminal", icon: Terminal, label: "Command" },
+            { id: "settings", icon: Settings, label: "Settings" },
+          ] as const).map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`flex items-center gap-3 px-4 py-2.5 text-sm transition-all ${
+                activeTab === tab.id
+                  ? "text-[#00e5ff] bg-[#00e5ff]/10 border-r-2 border-[#00e5ff]"
+                  : "text-[#8b949e] hover:text-white hover:bg-[#21262d]"
+              }`}
+            >
+              <tab.icon className="w-4 h-4 shrink-0" />
+              <span className="hidden md:block">{tab.label}</span>
+            </button>
+          ))}
+          <div className="flex-1" />
+          {connected && (
+            <button onClick={restartBot} className="flex items-center gap-3 px-4 py-2.5 text-sm text-[#ff6b6b] hover:bg-[#ff1744]/10 transition-all">
+              <Power className="w-4 h-4 shrink-0" />
+              <span className="hidden md:block">Restart</span>
+            </button>
+          )}
+        </nav>
+
+        {/* ── CONTENT AREA ── */}
+        <main className="flex-1 overflow-y-auto p-4 md:p-6">
+          {!connected && !showApiConfig && (
+            <div className="flex flex-col items-center justify-center h-full text-[#8b949e]">
+              <WifiOff className="w-12 h-12 mb-4" />
+              <p className="text-lg font-semibold">Not Connected</p>
+              <p className="text-sm mt-1">Configure bot API URL to connect</p>
+              <button onClick={() => setShowApiConfig(true)} className="mt-4 px-4 py-2 bg-[#21262d] rounded text-sm hover:bg-[#30363d]">
+                Configure
+              </button>
+            </div>
+          )}
+
+          {/* ═══ OVERVIEW TAB ═══ */}
+          {activeTab === "overview" && connected && status && (
+            <div className="space-y-6 animate-slide-up">
+              {/* Stats Cards */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <StatCard icon={<Clock className="w-5 h-5 text-[#00e5ff]" />} label="Uptime" value={formatUptime(status.bot.uptime)} />
+                <StatCard icon={<MemoryStick className="w-5 h-5 text-[#ff9800]" />} label="RAM Usage" value={`${status.memory.rss} MB`} sub={`Heap: ${status.memory.heapUsed}/${status.memory.heapTotal} MB`} />
+                <StatCard icon={<Layers className="w-5 h-5 text-[#00e676]" />} label="Plugins" value={String(status.stats.totalPlugins)} />
+                <StatCard icon={<Users className="w-5 h-5 text-[#e040fb]" />} label="Users" value={String(status.stats.totalUsers)} sub={`${status.stats.totalChats} chats`} />
+              </div>
+
+              {/* Bot Info + RAM Chart */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Bot Info */}
+                <div className="glass-panel rounded-xl p-5">
+                  <h3 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
+                    <Bot className="w-4 h-4 text-[#00e5ff]" /> Bot Information
+                  </h3>
+                  <div className="space-y-3 text-sm">
+                    <InfoRow label="Name" value={status.bot.name} />
+                    <InfoRow label="Number" value={status.bot.number || "N/A"} />
+                    <InfoRow label="Owner" value={`${status.bot.ownerName} (${status.bot.owner})`} />
+                    <InfoRow label="Prefix" value={status.bot.prefix} />
+                    <InfoRow label="Mode" value={status.bot.public ? "Public" : "Self"} color={status.bot.public ? "#00e676" : "#ff9800"} />
+                    <InfoRow label="Connection" value={status.bot.connection} color={status.bot.connection === "connected" ? "#00e676" : "#ff1744"} />
+                    <InfoRow label="Hit Today" value={status.stats.hitToday} />
+                    <InfoRow label="Platform" value={status.bot.version ? `v${status.bot.version}` : "N/A"} />
+                  </div>
                 </div>
 
-                {/* OFFICE PANEL */}
-                <div className={`absolute lg:relative top-0 left-0 w-full h-full lg:w-[42%] bg-[#0d1117] flex flex-col border-r border-[#30363d] transition-all duration-300 z-10 ${activeTab === 'office' ? 'opacity-100 translate-x-0 pointer-events-auto' : 'opacity-0 translate-x-4 pointer-events-none lg:opacity-100 lg:translate-x-0 lg:pointer-events-auto'}`}>
-                    <div className="flex-1 border-b border-[#30363d] relative flex flex-col overflow-hidden bg-gradient-to-b from-[#0a0c10] to-[#111827]">
-                        <div className="absolute top-3 left-1/2 -translate-x-1/2 w-[85%] h-[55px] bg-black/80 border border-[#30363d] rounded p-2 font-mono text-[0.75rem] text-[#00e676] flex flex-col justify-end z-[30]"><div className="animate-[slideUp_0.2s_ease-out] whitespace-nowrap opacity-80">{terminalMsg}</div></div>
-                        <svg className="absolute top-0 left-0 w-full h-full z-[5] pointer-events-none overflow-visible">{cables.map(c => (<path key={c.id} d={c.d} stroke={c.color} className={`dynamic-cable ${c.animClass}`} style={{ filter: `drop-shadow(0 0 6px ${c.color})` }} />))}</svg>
-                        <div ref={containerRef} className="absolute top-0 left-0 w-full h-full pt-[80px] pb-5 px-[10px] flex items-center justify-center z-[10]"><div className="flex flex-wrap justify-center gap-[30px] w-full max-w-[500px]">{renderRobot('ui','UI/UX')}{renderRobot('front','Frontend')}{renderRobot('back','Backend')}{renderRobot('qa','QA/Sec')}{renderRobot('dev','DevOps')}</div></div>
-                    </div>
-                    <div className="h-[35%] bg-[#010409] p-4 overflow-y-auto font-mono text-[0.75rem]">{logs.map((l, i) => (<div key={i} className="flex gap-2 mb-1.5 border-b border-white/5 pb-1"><span className="text-[#8b949e] shrink-0">{l.time}</span><span className={`shrink-0 font-bold ${l.type==='SUCC'?'text-[#00e676]':l.type==='ERR'?'text-[#ff1744]':'text-[#00e5ff]'}`}>{l.source}:</span><span className="text-[#c9d1d9]">{l.text}</span></div>))}<div ref={logEndRef} /></div>
+                {/* RAM Visual */}
+                <div className="glass-panel rounded-xl p-5">
+                  <h3 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
+                    <Cpu className="w-4 h-4 text-[#ff9800]" /> Memory Dashboard
+                  </h3>
+                  <div className="space-y-4">
+                    <RAMBar label="RSS" used={status.memory.rss} total={512} color="#00e5ff" />
+                    <RAMBar label="Heap Used" used={status.memory.heapUsed} total={status.memory.heapTotal} color="#00e676" />
+                    <RAMBar label="Heap Total" used={status.memory.heapTotal} total={512} color="#ff9800" />
+                    <RAMBar label="External" used={status.memory.external} total={100} color="#e040fb" />
+                  </div>
+                  <div className="mt-4 pt-3 border-t border-[#30363d] grid grid-cols-2 gap-2 text-xs text-[#8b949e]">
+                    <div>Self-Heal: <span className={status.selfHeal.enabled ? "text-[#00e676]" : "text-[#ff1744]"}>{status.selfHeal.enabled ? "ON" : "OFF"}</span></div>
+                    <div>AutoFix: <span className={status.selfHeal.autoFix ? "text-[#00e676]" : "text-[#8b949e]"}>{status.selfHeal.autoFix ? "ON" : "OFF"}</span></div>
+                  </div>
                 </div>
+              </div>
 
-                {/* PREVIEW PANEL */}
-                <div className={`absolute lg:relative top-0 left-0 w-full h-full lg:w-[30%] bg-black flex flex-col transition-all duration-300 z-10 ${activeTab === 'preview' ? 'opacity-100 translate-x-0 pointer-events-auto' : 'opacity-0 translate-x-4 pointer-events-none lg:opacity-100 lg:translate-x-0 lg:pointer-events-auto'}`}>
-                    <div className="w-full p-3 flex justify-center gap-2 bg-[#0d1117] border-b border-[#30363d] z-20 shrink-0">{['mobile', 'tablet', 'desktop'].map(d => (<button key={d} onClick={() => setDevice(d)} className={`px-4 py-1.5 rounded-full text-xs ${device === d ? 'bg-[#00e5ff] text-black font-bold shadow-[0_0_10px_#00e5ff]' : 'bg-[#21262d] border border-[#30363d] text-[#8b949e]'}`}>{d}</button>))}</div>
-                    <div ref={previewContRef} className="flex-1 flex items-center justify-center overflow-hidden bg-[radial-gradient(circle,#161b22_0%,#010409_100%)]">
-                        <div ref={devWrapperRef} className="relative flex flex-col items-center origin-center transition-all duration-500">
-                            <div className={`bg-white relative overflow-hidden shadow-[0_20px_40px_rgba(0,0,0,0.8)] transition-all duration-500 ${device === 'mobile' ? 'w-[375px] h-[812px] rounded-[40px] border-[14px] border-[#010409]' : device === 'tablet' ? 'w-[768px] h-[1024px] rounded-[30px] border-[20px] border-[#010409]' : 'w-[1280px] h-[720px] rounded-t-xl border-[16px] border-b-[25px] border-[#010409]'}`}><iframe srcDoc={iframeContent} className="w-full h-full border-none bg-[#f8fafc]" /></div>
-                            <div className={`w-[120%] h-[30px] bg-gradient-to-b from-[#8b949e] to-[#484f58] rounded-b-[15px] absolute bottom-[-30px] flex justify-center items-center transition-opacity duration-500 ${device === 'desktop' ? 'opacity-100' : 'opacity-0'}`} style={{ transform: 'perspective(300px) rotateX(40deg)', transformOrigin: 'top' }}><div className="w-[30%] h-[5px] bg-[#30363d] rounded-[5px] -mt-[15px]"></div></div>
-                        </div>
+              {/* Activity Log */}
+              <div className="glass-panel rounded-xl p-5">
+                <h3 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-[#00e5ff]" /> Activity Log
+                </h3>
+                <div className="max-h-[200px] overflow-y-auto font-mono text-xs space-y-1">
+                  {logs.slice(-30).map((l, i) => (
+                    <div key={i} className="flex gap-2 py-0.5 border-b border-white/5">
+                      <span className="text-[#8b949e] shrink-0">{l.time}</span>
+                      <span className={`shrink-0 font-bold ${l.type === "SUCC" ? "text-[#00e676]" : l.type === "ERR" ? "text-[#ff1744]" : l.type === "WARN" ? "text-[#ff9800]" : l.type === "FIX" ? "text-[#e040fb]" : "text-[#00e5ff]"}`}>
+                        {l.source}
+                      </span>
+                      <span className="text-[#c9d1d9]">{l.text}</span>
                     </div>
+                  ))}
+                  <div ref={logEndRef} />
                 </div>
+              </div>
             </div>
-        </>
-    );
+          )}
+
+          {/* ═══ SELF-HEAL TAB ═══ */}
+          {activeTab === "selfheal" && connected && (
+            <div className="space-y-6 animate-slide-up">
+              {/* Self-Heal Header */}
+              <div className="glass-panel rounded-xl p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Shield className="w-5 h-5 text-[#00e5ff]" /> Self-Heal AI Agent V4
+                  </h3>
+                  <button onClick={toggleSelfHeal} className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${settings?.selfHealEnabled ? "bg-[#00e676]/20 text-[#00e676] border border-[#00e676]/40 hover:bg-[#00e676]/30" : "bg-[#ff1744]/20 text-[#ff1744] border border-[#ff1744]/40 hover:bg-[#ff1744]/30"}`}>
+                    {settings?.selfHealEnabled ? "Enabled" : "Disabled"}
+                  </button>
+                </div>
+                <div className="grid grid-cols-3 gap-4">
+                  <AgentCard emoji="🔍" name="Mistral" role="Analyst" desc="Error diagnosis" active={!!selfHealStatus?.aiAgents?.analyst?.status?.includes("✅")} />
+                  <AgentCard emoji="🔧" name="Cohere" role="Fixer" desc="Code generation" active={!!selfHealStatus?.aiAgents?.fixer?.status?.includes("✅")} />
+                  <AgentCard emoji="🧪" name="OpenRouter" role="Tester" desc="Validation" active={!!selfHealStatus?.aiAgents?.tester?.status?.includes("✅")} />
+                </div>
+              </div>
+
+              {/* Pipeline Visualization */}
+              <div className="glass-panel rounded-xl p-5">
+                <h3 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
+                  <ArrowUpCircle className="w-4 h-4 text-[#00e5ff]" /> Fix Pipeline
+                </h3>
+                <div className="flex items-center gap-3 mb-4 text-xs text-[#8b949e]">
+                  <span>Error Detected</span>
+                  <ChevronRight className="w-3 h-3" />
+                  <span className="text-[#00e5ff]">Analyst</span>
+                  <ChevronRight className="w-3 h-3" />
+                  <span className="text-[#ff9800]">Fixer</span>
+                  <ChevronRight className="w-3 h-3" />
+                  <span className="text-[#00e676]">Tester</span>
+                  <ChevronRight className="w-3 h-3" />
+                  <span>Auto-Save</span>
+                </div>
+                <div className="text-xs text-[#8b949e]">
+                  Active Sessions: {selfHealStatus?.activeSessions || 0} | Pending: {selfHealStatus?.pendingNotifications || 0} | Max Cycles: {selfHealStatus?.maxCycles || 3}
+                </div>
+              </div>
+
+              {/* Self-Heal Events */}
+              <div className="glass-panel rounded-xl p-5">
+                <h3 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
+                  <Zap className="w-4 h-4 text-yellow-400" /> Recent Events
+                </h3>
+                <div className="max-h-[300px] overflow-y-auto space-y-2">
+                  {events.length === 0 && <p className="text-xs text-[#8b949e]">No events yet. Errors will appear here when detected.</p>}
+                  {events.slice(-20).reverse().map((ev, i) => (
+                    <div key={i} className="flex items-start gap-3 p-2 rounded bg-[#010409] border border-[#21262d]">
+                      <div className={`w-2 h-2 mt-1.5 rounded-full shrink-0 ${ev.type === "fix_started" ? "bg-[#00e5ff]" : ev.type === "toggle" ? "bg-[#ff9800]" : ev.type === "settings_updated" ? "bg-[#00e676]" : ev.type === "restart" ? "bg-[#ff1744]" : "bg-[#8b949e]"}`} />
+                      <div className="flex-1 text-xs">
+                        <div className="text-[#c9d1d9] font-mono">{ev.type}</div>
+                        <div className="text-[#8b949e] mt-0.5">{new Date(ev.timestamp).toLocaleString("id-ID")}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ═══ TERMINAL TAB ═══ */}
+          {activeTab === "terminal" && connected && (
+            <div className="space-y-4 animate-slide-up h-full flex flex-col">
+              <div className="glass-panel rounded-xl p-5 flex-1 flex flex-col">
+                <h3 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
+                  <Terminal className="w-4 h-4 text-[#00e676]" /> Command Terminal
+                </h3>
+                <p className="text-xs text-[#8b949e] mb-3">
+                  Send commands to the bot. Example: <code className="text-[#00e5ff]">perbaiki fitur twitter</code>
+                </p>
+                <div className="flex-1 bg-[#010409] border border-[#30363d] rounded-lg p-4 font-mono text-xs overflow-y-auto min-h-[300px]">
+                  {commandOutput.map((line, i) => (
+                    <div key={i} className={`mb-1 ${line.startsWith(">") ? "text-[#00e5ff]" : line.includes("✅") ? "text-[#00e676]" : line.includes("❌") ? "text-[#ff1744]" : "text-[#8b949e]"}`}>
+                      {line}
+                    </div>
+                  ))}
+                  <div ref={cmdEndRef} />
+                </div>
+                <div className="flex gap-2 mt-3">
+                  <input
+                    value={commandInput}
+                    onChange={(e) => setCommandInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && sendCommand()}
+                    placeholder="perbaiki fitur twitter..."
+                    className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm outline-none focus:border-[#00e5ff] font-mono"
+                  />
+                  <button onClick={sendCommand} className="px-4 py-2 bg-[#00e5ff] text-black rounded font-bold text-sm hover:bg-[#00b8d4] flex items-center gap-2">
+                    <Send className="w-4 h-4" /> Send
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ═══ SETTINGS TAB ═══ */}
+          {activeTab === "settings" && connected && settings && (
+            <div className="space-y-6 animate-slide-up">
+              <div className="glass-panel rounded-xl p-5">
+                <h3 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
+                  <Bot className="w-4 h-4 text-[#00e5ff]" /> Bot Settings
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <SettingInput label="Bot Name" value={settings.botName} onChange={(v) => updateSetting("botName", v)} />
+                  <SettingInput label="Owner Name" value={settings.ownerName} onChange={(v) => updateSetting("ownerName", v)} />
+                  <SettingInput label="Prefix" value={settings.prefix} onChange={(v) => updateSetting("prefix", v)} />
+                  <SettingInput label="Sticker Pack" value={settings.packName} onChange={(v) => updateSetting("packName", v)} />
+                  <SettingInput label="Author Name" value={settings.authorName} onChange={(v) => updateSetting("authorName", v)} />
+                </div>
+              </div>
+
+              <div className="glass-panel rounded-xl p-5">
+                <h3 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
+                  <Shield className="w-4 h-4 text-[#00e676]" /> Feature Toggles
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <ToggleSetting label="Public Mode" value={settings.public} onChange={(v) => updateSetting("public", v)} desc="Allow everyone to use bot" />
+                  <ToggleSetting label="Anti Spam" value={settings.antiSpam} onChange={(v) => updateSetting("antiSpam", v)} desc="Block spammers automatically" />
+                  <ToggleSetting label="Auto Typing" value={settings.autoTyping} onChange={(v) => updateSetting("autoTyping", v)} desc="Show typing indicator" />
+                  <ToggleSetting label="GC Only" value={settings.gcOnly} onChange={(v) => updateSetting("gcOnly", v)} desc="Only respond in groups" />
+                  <ToggleSetting label="Self-Heal" value={settings.selfHealEnabled} onChange={toggleSelfHeal} desc="Auto-fix plugin errors" />
+                  <ToggleSetting label="Auto Fix" value={settings.selfHealAutoFix} onChange={(v) => updateSetting("selfHealAutoFix", v)} desc="Fix without confirmation" />
+                </div>
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// SUB-COMPONENTS
+// ═══════════════════════════════════════════════════════════
+
+function StatCard({ icon, label, value, sub }: { icon: React.ReactNode; label: string; value: string; sub?: string }) {
+  return (
+    <div className="glass-panel rounded-xl p-4">
+      <div className="flex items-center gap-2 mb-2">{icon}<span className="text-xs text-[#8b949e] uppercase font-bold">{label}</span></div>
+      <div className="text-xl font-bold text-white">{value}</div>
+      {sub && <div className="text-[10px] text-[#8b949e] mt-1">{sub}</div>}
+    </div>
+  );
+}
+
+function InfoRow({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="flex justify-between items-center py-1 border-b border-[#21262d]">
+      <span className="text-[#8b949e]">{label}</span>
+      <span className="font-mono" style={color ? { color } : {}}>{value}</span>
+    </div>
+  );
+}
+
+function RAMBar({ label, used, total, color }: { label: string; used: number; total: number; color: string }) {
+  const pct = Math.min(100, Math.round((used / total) * 100));
+  return (
+    <div>
+      <div className="flex justify-between text-xs mb-1">
+        <span className="text-[#8b949e]">{label}</span>
+        <span style={{ color }}>{used} / {total} MB ({pct}%)</span>
+      </div>
+      <div className="h-2 bg-[#21262d] rounded-full overflow-hidden">
+        <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: color, boxShadow: `0 0 8px ${color}40` }} />
+      </div>
+    </div>
+  );
+}
+
+function AgentCard({ emoji, name, role, desc, active }: { emoji: string; name: string; role: string; desc: string; active: boolean }) {
+  return (
+    <div className={`p-3 rounded-lg border transition-all ${active ? "bg-[#00e5ff]/5 border-[#00e5ff]/30" : "bg-[#21262d]/30 border-[#30363d]"}`}>
+      <div className="text-lg mb-1">{emoji}</div>
+      <div className="text-xs font-bold text-white">{name}</div>
+      <div className="text-[10px] text-[#00e5ff]">{role}</div>
+      <div className="text-[10px] text-[#8b949e] mt-1">{desc}</div>
+      <div className={`w-2 h-2 rounded-full mt-2 ${active ? "bg-[#00e676] shadow-[0_0_6px_#00e676]" : "bg-[#484f58]"}`} />
+    </div>
+  );
+}
+
+function SettingInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  const [val, setVal] = useState(value);
+  const [dirty, setDirty] = useState(false);
+  useEffect(() => { setVal(value); setDirty(false); }, [value]);
+  return (
+    <div>
+      <label className="text-[10px] uppercase text-[#8b949e] font-bold mb-1 block">{label}</label>
+      <div className="flex gap-2">
+        <input value={val} onChange={(e) => { setVal(e.target.value); setDirty(true); }} className="flex-1 bg-[#010409] border border-[#30363d] rounded px-3 py-2 text-sm outline-none focus:border-[#00e5ff]" />
+        {dirty && <button onClick={() => { onChange(val); setDirty(false); }} className="px-3 py-2 bg-[#00e5ff] text-black rounded text-xs font-bold hover:bg-[#00b8d4]">Save</button>}
+      </div>
+    </div>
+  );
+}
+
+function ToggleSetting({ label, value, onChange, desc }: { label: string; value: boolean; onChange: (v: boolean) => void; desc: string }) {
+  return (
+    <div className="flex items-center justify-between p-3 rounded-lg bg-[#010409] border border-[#21262d]">
+      <div>
+        <div className="text-sm font-medium text-white">{label}</div>
+        <div className="text-[10px] text-[#8b949e]">{desc}</div>
+      </div>
+      <button onClick={() => onChange(!value)} className={`w-10 h-5 rounded-full transition-all relative ${value ? "bg-[#00e676]" : "bg-[#30363d]"}`}>
+        <div className={`w-4 h-4 bg-white rounded-full absolute top-0.5 transition-all ${value ? "left-5" : "left-0.5"}`} />
+      </button>
+    </div>
+  );
 }
